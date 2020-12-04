@@ -1,0 +1,122 @@
+#!/bin/zsh
+if ! [ -d /tmp/youtube-dl ]; then
+  mkdir /tmp/youtube-dl
+fi
+cd /tmp/youtube-dl
+rm -rvf /tmp/youtube-dl/*
+LANG=en_GB.UTF-8
+OIFS=$IFS
+IFS=$'\n'
+declare -a duration_list
+declare -a watchid_list
+declare -a watchid_basket
+declare -a duration_basket
+dueTime="09-10"
+for i in $(/opt/local/bin/youtube-dl -j --flat-playlist "https://www.youtube.com/playlist?list=PLB1E6txvieEBF91bR1w_K70SkLURaYeef")
+do
+  if [ "$(echo "$i" | sed -E 's/.*"title":\ "?(\[.*\])"?.*/\1/g')" = "[Private video]" ]; then
+    continue
+  fi
+  duration_list+=($(echo "$i" | sed -E 's/.*"duration":\ "?([^"]*)\.0"?.*/\1/g'))
+  watchid_list+=($(echo "$i" | sed -E 's/.*"id":\ "?([^"]*)"?.*/\1/g'))
+done;
+IFS=$OIFS
+usagedLength=0
+while ! [ ${#watchid_list[@]} -eq 0 ]; do
+  availableLength=$(($(date -j -f "%Y-%m-%d-%H-%M-%S" "$(date "+%Y-%m-%d-$dueTime-00")" "+%s") - \
+$(date -j -v +20S -f "%Y-%m-%d-%H-%M-%S" "$(date "+%Y-%m-%d-%H-%M-%S")" "+%s")))
+  remainingLength=$((availableLength - usagedLength))
+  echo "Start, a=$availableLength, u=$usagedLength, r=$remainingLength"
+  echo "w=${#watchid_list[@]}, d=${#duration_list[@]}, i=${#watchid_basket[@]}, u=$usagedLength"
+  min="${duration_list[1]}"
+  for v in "${duration_list[@]}"; do
+    if [ $v -lt $min ]; then
+    min=$v
+    fi
+  done
+  if [ $remainingLength -lt $min ]; then
+    echo "No suitable id."
+    break
+  fi
+  asmLength=$usagedLength
+  randomPos=$((RANDOM % ${#watchid_list[@]}))
+  if [ $randomPos -eq 0 ]; then
+    if [ ${#watchid_list[@]} -eq 1 ]; then
+      echo "randomPos hit 0, set to 1."
+      randomPos=1
+    else
+      echo "randomPos hit 0, but list still have element, set continue."
+      continue
+    fi
+  fi
+  echo "r=$randomPos"
+  asmLength=$((usagedLength + ${duration_list[$randomPos]}))
+  if [ $asmLength -lt $availableLength ]; then
+    echo "Hit music"
+    # add to id_basket
+    watchid_basket+=(${watchid_list[$randomPos]})
+    duration_basket+=(${duration_list[$randomPos]})
+    usagedLength=$asmLength
+    # remove from queue.
+    duration_list[$randomPos]=()
+    watchid_list[$randomPos]=()
+  else
+    # item too big remove from queue.
+    echo "asm=$asmLength gt a=$availableLength"
+    duration_list[$randomPos]=()
+    watchid_list[$randomPos]=()
+  fi
+  echo "w=${#watchid_list[@]}, d=${#duration_list[@]}, i=${#watchid_basket[@]}, u=$usagedLength, Bye"
+done
+if [ $usagedLength -eq 0 ]; then
+  echo "We passed minimum start time. exit."
+  exit 1
+fi
+for (( i = 1; i <= ${#watchid_basket[@]}; i++ )); do
+  /opt/local/bin/youtube-dl -o "$i.%(ext)s" -f bestaudio "https://www.youtube.com/watch?v=${watchid_basket[$i]}" &
+done
+playIndex=1
+getStartTime() {
+  echo "$(date -j -v -"$usagedLength"S -f "%Y-%m-%d-%H-%M-%S" "$(date "+%Y-%m-%d-$dueTime-00")" "+%s")"
+}
+getCurrentTime() {
+  echo "$(date -j -f "%Y-%m-%d-%H-%M-%S" "$(date "+%Y-%m-%d-%H-%M-%S")" "+%s")"
+}
+timeLeftForSleep=$(($(getStartTime) - $(getCurrentTime)))
+while (($playIndex <= ${#watchid_basket[@]})); do
+  echo "i=$playIndex"
+  if ! [ $timeLeftForSleep -gt 0 ]; then
+    if [ $((${#watchid_basket[@]} - $playIndex)) -eq 0 ]; then
+      echo "We passed minimum start time and there is no more track can play. exit."
+      exit 1
+    else
+      echo "Remove first music because we passed the time on playing first track. Skip to second track."
+      usagedLength=$((usagedLength - ${duration_basket[$playIndex]}))
+      playIndex=$((playIndex + 1))
+      timeLeftForSleep=$(($(getStartTime) - $(getCurrentTime)))
+      sleep $timeLeftForSleep
+    fi
+  else
+    if [ $playIndex -eq 1 ]; then
+      echo "Music will start at $(date -j -f "%s" "$(getStartTime)" "+%Y-%m-%d %H:%M:%S"), Sleep $timeLeftForSleep second(s)"
+      sleep $timeLeftForSleep
+    fi
+    ls $playIndex.*.* 1>/dev/null 2>&1
+    if [ "$?" -eq "0" ]; then
+      if [ $((${#watchid_basket[@]} - $playIndex)) -eq 0 ]; then
+        echo "We passed minimum start time also this is last track. exit."
+        exit 1
+      fi
+      usagedLength=$((usagedLength - ${duration_basket[$playIndex]}))
+      playIndex=$((playIndex + 1))
+      timeLeftForSleep=$(($(getStartTime) - $(getCurrentTime)))
+      echo "Retry...Music will start at $(date -j -f "%s" "$(getStartTime)" "+%Y-%m-%d %H:%M:%S"), Sleep $timeLeftForSleep second(s)"
+      sleep $timeLeftForSleep
+      continue
+    fi
+    /opt/local/bin/ffplay -i $playIndex.* -af "volume=-6dB" -nodisp -autoexit -hide_banner
+    usagedLength=$((usagedLength - ${duration_basket[$playIndex]}))
+    playIndex=$((playIndex + 1))
+  fi
+done
+rm -rf /tmp/youtube-dl
